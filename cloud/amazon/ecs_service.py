@@ -42,20 +42,19 @@ options:
         required: true
     cluster:
         description:
-          - The name of the cluster in which the service exists
+          - The name of the cluster in which the service exists.  If unspecified then the default cluster will be used.
         required: false
     task_definition:
         description:
-          - The task definition the service will run
+          - The task definition the service will run.  If unspecified then the current service value will be used.
         required: false
     load_balancers:
         description:
           - The list of ELBs defined for this service
         required: false
-
     desired_count:
         description:
-          - The count of how many instances of the service
+          - The count of how many instances of the service.  If unspecified then the current service value will be used.
         required: false
     client_token:
         description:
@@ -82,20 +81,29 @@ extends_documentation_fragment:
 
 EXAMPLES = '''
 # Note: These examples do not set authentication details, see the AWS Guide for details.
+# Create a new service
 - ecs_service:
     state: present
     name: console-test-service
     cluster: new_cluster
-    task_definition: new_cluster-task:1"
+    task_definition: new_cluster-task:1
     desired_count: 0
 
-# Basic provisioning example
+# Update the task definition of an existing service
 - ecs_service:
-    name: default
     state: present
+    name: console-test-service
     cluster: new_cluster
+    task_definition: new_cluster-task:2
 
-# Simple example to delete
+# Update the desired count of an existing service
+- ecs_service:
+    state: present
+    name: console-test-service
+    cluster: new_cluster
+    desired_count: 2
+
+# Delete a service
 - ecs_service:
     name: default
     state: absent
@@ -195,22 +203,12 @@ class EcsServiceManager:
         self.module = module
 
         try:
-            # self.ecs = boto3.client('ecs')
             region, ec2_url, aws_connect_kwargs = get_aws_connection_info(module, boto3=True)
             if not region:
                 module.fail_json(msg="Region must be specified as a parameter, in EC2_REGION or AWS_REGION environment variables or in boto configuration file")
             self.ecs = boto3_conn(module, conn_type='client', resource='ecs', region=region, endpoint=ec2_url, **aws_connect_kwargs)
         except boto.exception.NoAuthHandlerFound, e:
             self.module.fail_json(msg="Can't authorize connection - "+str(e))
-
-    # def list_clusters(self):
-    #     return self.client.list_clusters()
-    # {'failures=[],
-    # 'ResponseMetadata={'HTTPStatusCode=200, 'RequestId='ce7b5880-1c41-11e5-8a31-47a93a8a98eb'},
-    # 'clusters=[{'activeServicesCount=0, 'clusterArn='arn:aws:ecs:us-west-2:777110527155:cluster/default', 'status='ACTIVE', 'pendingTasksCount=0, 'runningTasksCount=0, 'registeredContainerInstancesCount=0, 'clusterName='default'}]}
-    # {'failures=[{'arn='arn:aws:ecs:us-west-2:777110527155:cluster/bogus', 'reason='MISSING'}],
-    # 'ResponseMetadata={'HTTPStatusCode=200, 'RequestId='0f66c219-1c42-11e5-8a31-47a93a8a98eb'},
-    # 'clusters=[]}
 
     def find_in_array(self, array_of_services, service_name, field_name='serviceArn'):
         for c in array_of_services:
@@ -219,18 +217,20 @@ class EcsServiceManager:
         return None
 
     def describe_service(self, cluster_name, service_name):
-        response = self.ecs.describe_services(
-            cluster=cluster_name,
-            services=[
-                service_name
-        ])
+        describe_args = dict(
+            services=[service_name]
+        )
+        if cluster_name is not None:
+            describe_args.update(cluster=cluster_name)
+
+        response = self.ecs.describe_services(**describe_args)
         msg = ''
         if len(response['failures'])>0:
             c = self.find_in_array(response['failures'], service_name, 'arn')
             msg += ", failure reason is "+c['reason']
             if c and c['reason']=='MISSING':
                 return None
-            # fall thru and look through found ones
+                # fall thru and look through found ones
         if len(response['services'])>0:
             c = self.find_in_array(response['services'], service_name)
             if c:
@@ -250,24 +250,37 @@ class EcsServiceManager:
         return True
 
     def create_service(self, service_name, cluster_name, task_definition,
-        load_balancers, desired_count, client_token, role):
-        response = self.ecs.create_service(
-            cluster=cluster_name,
+                       load_balancers, desired_count, client_token, role):
+        ecs_args = dict(
             serviceName=service_name,
             taskDefinition=task_definition,
-            loadBalancers=load_balancers,
             desiredCount=desired_count,
-            clientToken=client_token,
-            role=role)
+        )
+        if cluster_name is not None:
+            ecs_args.update(cluster=cluster_name)
+        if load_balancers is not None:
+            ecs_args.update(loadBalancers=load_balancers)
+        if client_token is not None:
+            ecs_args.update(clientToken=client_token)
+        if role is not None:
+            ecs_args.update(role=role)
+
+        response = self.ecs.create_service(**ecs_args)
         return self.jsonize(response['service'])
 
     def update_service(self, service_name, cluster_name, task_definition,
-        load_balancers, desired_count, client_token, role):
-        response = self.ecs.update_service(
-            cluster=cluster_name,
-            service=service_name,
-            taskDefinition=task_definition,
-            desiredCount=desired_count)
+                       desired_count):
+        ecs_args = dict(
+            service=service_name
+        )
+        if cluster_name is not None:
+            ecs_args.update(cluster=cluster_name)
+        if task_definition is not None:
+            ecs_args.update(taskDefinition=task_definition)
+        if desired_count is not None:
+            ecs_args.update(desiredCount=desired_count)
+
+        response = self.ecs.update_service(**ecs_args)
         return self.jsonize(response['service'])
 
     def jsonize(self, service):
@@ -286,7 +299,12 @@ class EcsServiceManager:
         return service
 
     def delete_service(self, service, cluster=None):
-        return self.ecs.delete_service(cluster=cluster, service=service)
+        ecs_args = dict(
+            service=service
+        )
+        if cluster is not None:
+            ecs_args.update(cluster=cluster)
+        return self.ecs.delete_service(**ecs_args)
 
 def main():
 
@@ -307,22 +325,17 @@ def main():
     module = AnsibleModule(argument_spec=argument_spec, supports_check_mode=True)
 
     if not HAS_BOTO:
-      module.fail_json(msg='boto is required.')
+        module.fail_json(msg='boto is required.')
 
     if not HAS_BOTO3:
-      module.fail_json(msg='boto3 is required.')
-
-    if module.params['state'] == 'present':
-        if not 'task_definition' in module.params and module.params['task_definition'] is None:
-            module.fail_json(msg="To use create a service, a task_definition must be specified")
-        if not 'desired_count' in module.params and module.params['desired_count'] is None:
-            module.fail_json(msg="To use create a service, a desired_count must be specified")
+        module.fail_json(msg='boto3 is required.')
 
     service_mgr = EcsServiceManager(module)
     try:
         existing = service_mgr.describe_service(module.params['cluster'], module.params['name'])
     except Exception, e:
-        module.fail_json(msg="Exception describing service '"+module.params['name']+"' in cluster '"+module.params['cluster']+"': "+str(e))
+        module.fail_json(msg="Exception describing service '"+module.params['name']+"' in cluster '"
+                             + str(module.params['cluster'])+"': "+str(e))
 
     results = dict(changed=False )
     if module.params['state'] == 'present':
@@ -338,37 +351,26 @@ def main():
 
         if not matching:
             if not module.check_mode:
-                if module.params['load_balancers'] is None:
-                    loadBalancers = []
-                else:
-                    loadBalancers = module.params['load_balancers']
-                if module.params['role'] is None:
-                    role = ''
-                else:
-                    role = module.params['role']
-                if module.params['client_token'] is None:
-                    clientToken = ''
-                else:
-                    clientToken = module.params['client_token']
-
                 if update:
                     # update required
                     response = service_mgr.update_service(module.params['name'],
-                        module.params['cluster'],
-                        module.params['task_definition'],
-                        loadBalancers,
-                        module.params['desired_count'],
-                        clientToken,
-                        role)
+                                                          module.params['cluster'],
+                                                          module.params['task_definition'],
+                                                          module.params['desired_count'])
                 else:
                     # doesn't exist. create it.
+                    if module.params['desired_count'] is None:
+                        module.fail_json(msg="To create a service, a desired_count must be specified")
+                    if module.params['task_definition'] is None:
+                        module.fail_json(msg="To create a service, a task_definition must be specified")
+
                     response = service_mgr.create_service(module.params['name'],
-                        module.params['cluster'],
-                        module.params['task_definition'],
-                        loadBalancers,
-                        module.params['desired_count'],
-                        clientToken,
-                        role)
+                                                          module.params['cluster'],
+                                                          module.params['task_definition'],
+                                                          module.params['load_balancers'],
+                                                          module.params['desired_count'],
+                                                          module.params['client_token'],
+                                                          module.params['role'])
 
                 results['service'] = response
 
